@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Smart Scraper</h1>
+      <span id="site-type-badge" class="badge hidden"></span>
+    </header>
+
+    <section id="status-section">
+      <div class="spinner"></div>
+      <p id="status-text">Analyzing page...</p>
+    </section>
+
+    <section id="error-section" class="hidden">
+      <p id="error-text" class="error-text"></p>
+    </section>
+
+    <section id="options-section" class="hidden">
+      <p id="data-summary" class="summary-text"></p>
+      <button id="btn-scrape" class="btn btn-primary">
+        <span class="btn-icon">&#9881;</span> Scrape Page
+      </button>
+    </section>
+
+    <section id="scraping-section" class="hidden">
+      <div class="spinner"></div>
+      <p>Extracting data...</p>
+    </section>
+
+    <section id="result-section" class="hidden">
+      <p id="result-summary" class="summary-text"></p>
+
+      <div id="contact-cards" class="hidden">
+        <h2>Contact Info</h2>
+        <div id="contact-cards-list"></div>
+      </div>
+
+      <h2>Export Data</h2>
+      <div class="button-group">
+        <button id="btn-pdf" class="btn btn-export">
+          <span class="btn-icon">&#128196;</span> PDF
+        </button>
+        <button id="btn-excel" class="btn btn-export">
+          <span class="btn-icon">&#128202;</span> Excel
+        </button>
+        <button id="btn-csv" class="btn btn-export">
+          <span class="btn-icon">&#128203;</span> CSV
+        </button>
+      </div>
+      <button id="btn-rescrape" class="btn btn-secondary">Scrape Again</button>
+    </section>
+  </div>
+
+  <iframe id="sandbox-frame" src="../sandbox/sandbox.html"
+          style="display:none;" sandbox="allow-scripts"></iframe>
+
+  <script src="../utils/message-types.js"></script>
+  <script src="../lib/xlsx.full.min.js"></script>
+  <script src="../utils/csv-generator.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
