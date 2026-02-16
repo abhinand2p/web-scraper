@@ -248,30 +248,58 @@ function flattenDataToRows(response) {
     return [headers, ...rows];
   }
 
-  // General - export the most useful table-like data
-  // If tables exist, export the first table
-  if (data.tables && data.tables.length > 0) {
-    const t = data.tables[0];
-    if (t.headers.length > 0) {
-      return [t.headers, ...t.rows];
-    }
-    return t.rows;
-  }
+  // General - export structured data in order of usefulness
+  const allRows = [];
 
-  // Otherwise export links
-  if (data.links && data.links.length > 0) {
-    return [["Link Text", "URL"], ...data.links.map(l => [l.text, l.url])];
-  }
-
-  // Fallback: metadata + text
-  const rows = [["Property", "Value"]];
+  // Page metadata first
+  allRows.push(["Page Info", ""]);
   if (data.meta) {
-    for (const [key, val] of Object.entries(data.meta)) {
-      if (val) rows.push([key, val]);
+    if (data.meta.title) allRows.push(["Title", data.meta.title]);
+    if (data.meta.url) allRows.push(["URL", data.meta.url]);
+    if (data.meta.description) allRows.push(["Description", data.meta.description]);
+    if (data.meta.author) allRows.push(["Author", data.meta.author]);
+  }
+
+  // If tables exist, include them (most structured data)
+  if (data.tables && data.tables.length > 0) {
+    allRows.push(["", ""]);
+    allRows.push(["--- Tables ---", ""]);
+    for (const t of data.tables) {
+      if (t.headers.length > 0) {
+        allRows.push(t.headers);
+      }
+      for (const row of t.rows) {
+        allRows.push(row);
+      }
+      allRows.push(["", ""]); // separator
     }
   }
-  rows.push(["Content", (data.textContent || "").substring(0, 30000)]);
-  return rows;
+
+  // Headings for page structure
+  if (data.headings && data.headings.length > 0) {
+    allRows.push(["", ""]);
+    allRows.push(["--- Page Structure ---", ""]);
+    allRows.push(["Level", "Heading"]);
+    for (const h of data.headings) {
+      allRows.push([`H${h.level}`, h.text]);
+    }
+  }
+
+  // Links
+  if (data.links && data.links.length > 0) {
+    allRows.push(["", ""]);
+    allRows.push(["--- Links ---", ""]);
+    allRows.push(["Link Text", "URL"]);
+    for (const l of data.links) {
+      allRows.push([l.text, l.url]);
+    }
+  }
+
+  if (allRows.length <= 1) {
+    allRows.push(["Content", (data.textContent || "").substring(0, 30000)]);
+  }
+
+  return allRows;
 }
 
 function generateFilename(extension) {
