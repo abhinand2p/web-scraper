@@ -1,157 +1,376 @@
-function scrapeLinkedIn() {
-  const contacts = [];
+// LinkedIn Voyager API scraper - fetches deep profile data using LinkedIn's internal API
+
+async function scrapeLinkedIn() {
   const path = window.location.pathname;
 
-  // Single profile page (/in/username)
+  // Profile page
   if (path.startsWith("/in/")) {
-    // Name - LinkedIn always has this in h1
-    const name = getLinkedInText([
-      "h1",
-      "[data-anonymize='person-name']"
-    ]);
-
-    // Headline / designation - the line right below the name
-    const title = getLinkedInText([
-      ".text-body-medium.break-words",
-      "div.text-body-medium",
-      "[data-anonymize='headline']",
-      "h2.top-card-layout__headline"
-    ]);
-
-    // Location
-    const location = getLinkedInText([
-      ".top-card-layout__first-subline .top-card__subline-item",
-      "span.text-body-small[class*='top-card']",
-      "[class*='top-card'] span[class*='location']"
-    ]) || getLocationFromProfile();
-
-    // Current company - try multiple approaches
-    const company = getCurrentCompany();
-
-    const profileUrl = window.location.href.split("?")[0];
-
-    // Email & phone - only visible if contact info section is open
-    const email = getEmailFromPage();
-    const phone = getPhoneFromPage();
-
-    // About section
-    const about = getLinkedInText([
-      "#about ~ div .inline-show-more-text span[aria-hidden='true']",
-      "#about + .pvs-list__container .inline-show-more-text span[aria-hidden='true']",
-      "[class*='about'] .inline-show-more-text span[aria-hidden='true']",
-      "section.pv-about-section p",
-      "#about ~ div span.visually-hidden"
-    ]).substring(0, 500);
-
-    // Connections
-    const connections = getLinkedInText([
-      "span.t-bold[class*='distance']",
-      "li.text-body-small span.t-bold",
-      "[class*='connections'] span.t-bold"
-    ]);
-
-    contacts.push({
-      name, title, company, location, email, phone,
-      profileUrl, about, connections
-    });
+    const username = path.split("/in/")[1].split("/")[0].split("?")[0];
+    return await scrapeLinkedInProfile(username);
   }
 
-  // Search results or people listing
-  else if (path.includes("/search/") || path.includes("/people")) {
-    // LinkedIn search results use list items
-    const resultContainers = document.querySelectorAll(
-      'li.reusable-search__result-container, ' +
-      'div[data-view-name="search-entity-result-universal-template"], ' +
-      'li[class*="search-result"], ' +
-      'div[class*="entity-result"]'
-    );
-
-    for (const container of resultContainers) {
-      const nameEl = container.querySelector(
-        'span[dir="ltr"] > span[aria-hidden="true"], ' +
-        'span[aria-hidden="true"], ' +
-        'a[class*="app-aware-link"] span'
-      );
-      const name = nameEl?.textContent?.trim()?.replace(/\s+/g, " ") || "";
-      if (!name || name.length < 2) continue;
-
-      const profileLink = container.querySelector('a[href*="/in/"]');
-      const profileUrl = profileLink?.href?.split("?")[0] || "";
-
-      const title = getContainerText(container, [
-        '.entity-result__primary-subtitle',
-        'div[class*="entity-result__primary-subtitle"]',
-        '.search-result__info .subline-level-1'
-      ]);
-
-      const location = getContainerText(container, [
-        '.entity-result__secondary-subtitle',
-        'div[class*="entity-result__secondary-subtitle"]',
-        '.search-result__info .subline-level-2'
-      ]);
-
-      contacts.push({
-        name, title, company: "", location,
-        email: "", phone: "", profileUrl,
-        about: "", connections: ""
-      });
-    }
+  // Search results
+  if (path.includes("/search/")) {
+    return scrapeLinkedInSearchResults();
   }
 
   // Company page
-  else if (path.includes("/company/")) {
-    const companyName = getLinkedInText([
-      "h1 span",
-      "h1",
-      ".org-top-card-summary__title span"
+  if (path.includes("/company/")) {
+    return scrapeLinkedInCompany();
+  }
+
+  // Fallback to DOM scraping
+  return { type: "linkedin", contacts: [scrapeLinkedInDOM()] };
+}
+
+// --- Voyager API Helpers ---
+
+function getCSRFToken() {
+  // LinkedIn stores CSRF token in JSESSIONID cookie (with quotes)
+  const match = document.cookie.match(/JSESSIONID="?([^";]+)"?/);
+  return match ? match[1] : "";
+}
+
+async function voyagerFetch(url) {
+  const csrf = getCSRFToken();
+  if (!csrf) return null;
+
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        "csrf-token": csrf,
+        "accept": "application/vnd.linkedin.normalized+json+2.1",
+        "x-restli-protocol-version": "2.0.0"
+      },
+      credentials: "include"
+    });
+
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+// --- Profile Scraping via API ---
+
+async function scrapeLinkedInProfile(username) {
+  // Fetch profile, contact info, and skills in parallel
+  const [profileData, contactData, skillsData] = await Promise.all([
+    voyagerFetch(`https://www.linkedin.com/voyager/api/identity/dash/profiles?q=memberIdentity&memberIdentity=${username}&decorationId=com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-93`),
+    voyagerFetch(`https://www.linkedin.com/voyager/api/identity/profiles/${username}/profileContactInfo`),
+    voyagerFetch(`https://www.linkedin.com/voyager/api/identity/profiles/${username}/skills?count=50`)
+  ]);
+
+  const contact = {
+    name: "",
+    title: "",
+    email: "",
+    phone: "",
+    company: "",
+    location: "",
+    profileUrl: `https://www.linkedin.com/in/${username}`,
+    about: "",
+    connections: "",
+    experience: [],
+    education: [],
+    skills: [],
+    websites: [],
+    twitter: "",
+    birthday: ""
+  };
+
+  // Parse profile data
+  if (profileData) {
+    const profile = extractProfile(profileData);
+    contact.name = profile.name;
+    contact.title = profile.headline;
+    contact.location = profile.location;
+    contact.about = profile.summary;
+    contact.company = profile.currentCompany;
+    contact.experience = profile.experience;
+    contact.education = profile.education;
+    contact.connections = profile.connectionCount;
+  }
+
+  // Parse contact info
+  if (contactData && contactData.data) {
+    const ci = contactData.data;
+    contact.email = ci.emailAddress || "";
+    contact.phone = (ci.phoneNumbers || []).map(p => p.number).join(", ");
+    contact.twitter = (ci.twitterHandles || []).map(t => t.name).join(", ");
+    contact.websites = (ci.websites || []).map(w => w.url || w.name || "");
+    contact.birthday = ci.birthDateOn
+      ? `${ci.birthDateOn.month}/${ci.birthDateOn.day}`
+      : "";
+  }
+
+  // Parse skills
+  if (skillsData) {
+    contact.skills = extractSkills(skillsData);
+  }
+
+  // If API failed, fall back to DOM scraping
+  if (!contact.name) {
+    const domData = scrapeLinkedInDOM();
+    Object.keys(domData).forEach(key => {
+      if (domData[key] && !contact[key]) contact[key] = domData[key];
+    });
+  }
+
+  return { type: "linkedin", contacts: [contact] };
+}
+
+function extractProfile(apiData) {
+  const result = {
+    name: "",
+    headline: "",
+    location: "",
+    summary: "",
+    currentCompany: "",
+    connectionCount: "",
+    experience: [],
+    education: []
+  };
+
+  // The API returns data in 'included' array and 'data' object
+  const included = apiData.included || [];
+  const data = apiData.data || {};
+
+  // Find the main profile entity
+  for (const entity of included) {
+    // Profile basics
+    if (entity.$type === "com.linkedin.voyager.dash.identity.profile.Profile" ||
+        entity.$type === "com.linkedin.voyager.identity.profile.Profile") {
+      result.name = [entity.firstName, entity.lastName].filter(Boolean).join(" ");
+      result.headline = entity.headline || "";
+      result.summary = (entity.summary || entity.about || "").substring(0, 1000);
+      if (entity.locationName) result.location = entity.locationName;
+      if (entity.geoLocationName) result.location = entity.geoLocationName;
+    }
+
+    // Also check for miniProfile
+    if (entity.$type === "com.linkedin.voyager.identity.shared.MiniProfile" ||
+        entity.$type === "com.linkedin.voyager.dash.identity.profile.tetris.MiniProfile") {
+      if (!result.name && entity.firstName) {
+        result.name = [entity.firstName, entity.lastName].filter(Boolean).join(" ");
+      }
+      if (!result.headline && entity.occupation) {
+        result.headline = entity.occupation;
+      }
+    }
+
+    // Experience / positions
+    if (entity.$type === "com.linkedin.voyager.dash.identity.profile.Position" ||
+        entity.$type === "com.linkedin.voyager.identity.profile.Position") {
+      const exp = {
+        title: entity.title || "",
+        company: entity.companyName || "",
+        location: entity.locationName || "",
+        startDate: formatLinkedInDate(entity.dateRange?.start || entity.timePeriod?.startDate),
+        endDate: formatLinkedInDate(entity.dateRange?.end || entity.timePeriod?.endDate) || "Present",
+        description: (entity.description || "").substring(0, 300)
+      };
+      if (exp.title || exp.company) {
+        result.experience.push(exp);
+      }
+    }
+
+    // Education
+    if (entity.$type === "com.linkedin.voyager.dash.identity.profile.Education" ||
+        entity.$type === "com.linkedin.voyager.identity.profile.Education") {
+      const edu = {
+        school: entity.schoolName || entity.school || "",
+        degree: entity.degreeName || entity.degree || "",
+        field: entity.fieldOfStudy || "",
+        startDate: formatLinkedInDate(entity.dateRange?.start || entity.timePeriod?.startDate),
+        endDate: formatLinkedInDate(entity.dateRange?.end || entity.timePeriod?.endDate)
+      };
+      if (edu.school) {
+        result.education.push(edu);
+      }
+    }
+
+    // Network info (connections count)
+    if (entity.$type === "com.linkedin.voyager.dash.identity.profile.tetris.NetworkInfo" ||
+        entity.connectionsCount !== undefined) {
+      result.connectionCount = String(entity.connectionsCount || entity.connectionCount || "");
+    }
+  }
+
+  // Extract company names from included entities for experience
+  const companyMap = {};
+  for (const entity of included) {
+    if (entity.$type === "com.linkedin.voyager.dash.organization.Company" ||
+        entity.$type === "com.linkedin.voyager.organization.Company") {
+      if (entity.entityUrn && entity.name) {
+        companyMap[entity.entityUrn] = entity.name;
+      }
+    }
+  }
+
+  // Fill in company names from references and find current company
+  for (const exp of result.experience) {
+    if (!exp.company) {
+      // Try to resolve from company map
+      for (const [urn, name] of Object.entries(companyMap)) {
+        exp.company = name;
+        break;
+      }
+    }
+  }
+
+  // Current company = first experience entry (most recent)
+  if (result.experience.length > 0) {
+    const current = result.experience.find(e => e.endDate === "Present") || result.experience[0];
+    result.currentCompany = current.company;
+  }
+
+  return result;
+}
+
+function extractSkills(apiData) {
+  const skills = [];
+  const included = apiData.included || apiData.data || [];
+  const elements = apiData.data?.elements || apiData.elements || [];
+
+  // Try elements array first
+  for (const el of elements) {
+    const name = el.name || el.skill?.name || "";
+    if (name) skills.push(name);
+  }
+
+  // Try included array
+  if (skills.length === 0) {
+    for (const entity of (Array.isArray(included) ? included : [])) {
+      if (entity.$type === "com.linkedin.voyager.identity.profile.Skill" ||
+          entity.$type === "com.linkedin.voyager.dash.identity.profile.Skill") {
+        if (entity.name) skills.push(entity.name);
+      }
+    }
+  }
+
+  return skills;
+}
+
+function formatLinkedInDate(dateObj) {
+  if (!dateObj) return "";
+  const month = dateObj.month || "";
+  const year = dateObj.year || "";
+  if (month && year) return `${month}/${year}`;
+  if (year) return String(year);
+  return "";
+}
+
+// --- Search Results (DOM-based, API is heavily paginated) ---
+
+function scrapeLinkedInSearchResults() {
+  const contacts = [];
+
+  const resultContainers = document.querySelectorAll(
+    'li.reusable-search__result-container, ' +
+    'div[data-view-name="search-entity-result-universal-template"], ' +
+    'li[class*="search-result"], ' +
+    'div[class*="entity-result"]'
+  );
+
+  for (const container of resultContainers) {
+    const nameEl = container.querySelector(
+      'span[dir="ltr"] > span[aria-hidden="true"], ' +
+      'span[aria-hidden="true"]'
+    );
+    const name = nameEl?.textContent?.trim()?.replace(/\s+/g, " ") || "";
+    if (!name || name.length < 2) continue;
+
+    const profileLink = container.querySelector('a[href*="/in/"]');
+    const profileUrl = profileLink?.href?.split("?")[0] || "";
+
+    const title = getSearchText(container, [
+      '.entity-result__primary-subtitle',
+      'div[class*="entity-result__primary-subtitle"]'
     ]);
 
-    const industry = getLinkedInText([
-      ".org-top-card-summary-info-list__info-item",
-      "div[class*='org-top-card'] [class*='info-item']"
+    const location = getSearchText(container, [
+      '.entity-result__secondary-subtitle',
+      'div[class*="entity-result__secondary-subtitle"]'
     ]);
-
-    const about = getLinkedInText([
-      "[class*='org-about'] p",
-      ".org-about-company-module__description",
-      "p[class*='about']"
-    ]).substring(0, 500);
 
     contacts.push({
-      name: companyName,
-      title: "Company",
-      company: industry,
-      location: "",
-      email: "",
-      phone: "",
-      profileUrl: window.location.href.split("?")[0],
-      about,
-      connections: ""
+      name, title, company: "", location,
+      email: "", phone: "", profileUrl,
+      about: "", connections: "",
+      experience: [], education: [], skills: [],
+      websites: [], twitter: "", birthday: ""
     });
   }
 
   return { type: "linkedin", contacts };
 }
 
-// --- LinkedIn Helper Functions ---
+// --- Company Page (DOM-based) ---
 
-function getLinkedInText(selectors) {
-  for (const sel of selectors) {
-    try {
-      const el = document.querySelector(sel);
-      if (el) {
-        // Prefer aria-hidden span (visible text without screen reader content)
-        const visibleSpan = el.querySelector('span[aria-hidden="true"]');
-        const textSource = visibleSpan || el;
-        const text = textSource.textContent.trim().replace(/\s+/g, " ");
-        if (text && text.length > 0) return text;
-      }
-    } catch (e) { /* skip */ }
-  }
-  return "";
+function scrapeLinkedInCompany() {
+  const companyName = domText("h1 span, h1") || "";
+  const industry = domText(".org-top-card-summary-info-list__info-item") || "";
+  const about = domText("[class*='org-about'] p, .org-about-company-module__description") || "";
+
+  return {
+    type: "linkedin",
+    contacts: [{
+      name: companyName,
+      title: "Company",
+      company: industry,
+      location: "",
+      email: "", phone: "",
+      profileUrl: window.location.href.split("?")[0],
+      about: about.substring(0, 500),
+      connections: "",
+      experience: [], education: [], skills: [],
+      websites: [], twitter: "", birthday: ""
+    }]
+  };
 }
 
-function getContainerText(container, selectors) {
+// --- DOM Fallback ---
+
+function scrapeLinkedInDOM() {
+  return {
+    name: domText("h1") || "",
+    title: domText(".text-body-medium.break-words, div.text-body-medium") || "",
+    email: (() => {
+      const el = document.querySelector('a[href^="mailto:"]');
+      return el ? el.href.replace("mailto:", "").split("?")[0] : "";
+    })(),
+    phone: (() => {
+      const el = document.querySelector('a[href^="tel:"]');
+      return el ? el.href.replace("tel:", "") : "";
+    })(),
+    company: "",
+    location: "",
+    profileUrl: window.location.href.split("?")[0],
+    about: "",
+    connections: "",
+    experience: [],
+    education: [],
+    skills: [],
+    websites: [],
+    twitter: "",
+    birthday: ""
+  };
+}
+
+// --- Helpers ---
+
+function domText(selector) {
+  try {
+    const el = document.querySelector(selector);
+    if (!el) return "";
+    const span = el.querySelector('span[aria-hidden="true"]');
+    return (span || el).textContent.trim().replace(/\s+/g, " ");
+  } catch (e) { return ""; }
+}
+
+function getSearchText(container, selectors) {
   for (const sel of selectors) {
     try {
       const el = container.querySelector(sel);
@@ -159,100 +378,7 @@ function getContainerText(container, selectors) {
         const text = el.textContent.trim().replace(/\s+/g, " ");
         if (text) return text;
       }
-    } catch (e) { /* skip */ }
+    } catch (e) {}
   }
-  return "";
-}
-
-function getCurrentCompany() {
-  // Method 1: Experience section - first/current role
-  const expSection = document.querySelector('#experience ~ div, #experience ~ .pvs-list__container, section[id*="experience"]');
-  if (expSection) {
-    const firstItem = expSection.querySelector(
-      'span[aria-hidden="true"], .t-bold span, [class*="company"] span'
-    );
-    if (firstItem) {
-      const text = firstItem.textContent.trim().replace(/\s+/g, " ");
-      if (text) return text;
-    }
-  }
-
-  // Method 2: Top card experience info
-  const topCardExp = document.querySelector(
-    '[class*="experience-list-item"] span, ' +
-    'button[aria-label*="Current company"] span, ' +
-    '[class*="pv-top-card--experience"] li span'
-  );
-  if (topCardExp) {
-    const text = topCardExp.textContent.trim().replace(/\s+/g, " ");
-    if (text) return text;
-  }
-
-  // Method 3: Look for company in headline (often "Title at Company")
-  const headline = getLinkedInText([
-    ".text-body-medium.break-words",
-    "div.text-body-medium"
-  ]);
-  if (headline.includes(" at ")) {
-    return headline.split(" at ").slice(1).join(" at ").trim();
-  }
-  if (headline.includes(" @ ")) {
-    return headline.split(" @ ").slice(1).join(" @ ").trim();
-  }
-
-  return "";
-}
-
-function getLocationFromProfile() {
-  // Location is often in a specific span within the top card
-  const spans = document.querySelectorAll('.pv-top-card--list-bullet li, [class*="top-card"] li');
-  for (const span of spans) {
-    const text = span.textContent.trim();
-    // Location typically contains a comma (City, State) or known location words
-    if (text && (text.includes(",") || text.match(/\b(area|region|city|state|country)\b/i))) {
-      return text;
-    }
-  }
-  return "";
-}
-
-function getEmailFromPage() {
-  // Check for mailto links anywhere on the page
-  const mailtoLinks = document.querySelectorAll('a[href^="mailto:"]');
-  for (const link of mailtoLinks) {
-    const email = link.href.replace("mailto:", "").split("?")[0].trim();
-    if (email && email.includes("@")) return email;
-  }
-
-  // Check contact info section if open
-  const contactSection = document.querySelector(
-    '[class*="contact-info"], [class*="pv-contact-info"], ' +
-    'section[class*="ci-email"], [data-section="contactInfo"]'
-  );
-  if (contactSection) {
-    const emailEl = contactSection.querySelector('a[href*="mailto:"], [class*="email"] a');
-    if (emailEl) return emailEl.textContent.trim();
-  }
-
-  return "";
-}
-
-function getPhoneFromPage() {
-  // Check for tel links
-  const telLinks = document.querySelectorAll('a[href^="tel:"]');
-  for (const link of telLinks) {
-    const phone = link.href.replace("tel:", "").trim();
-    if (phone) return phone;
-  }
-
-  // Check contact info section
-  const contactSection = document.querySelector(
-    '[class*="contact-info"], [class*="pv-contact-info"], [data-section="contactInfo"]'
-  );
-  if (contactSection) {
-    const phoneEl = contactSection.querySelector('[class*="phone"] span, [class*="tel"] span');
-    if (phoneEl) return phoneEl.textContent.trim();
-  }
-
   return "";
 }

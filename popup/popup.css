@@ -280,3 +280,27 @@ section {
 .btn-copy-all:hover {
   background: #d2e3fc;
 }
+
+/* Contact Card Sections (Experience, Education, Skills) */
+.contact-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #e8e8e8;
+}
+
+.contact-section-header {
+  font-size: 10px;
+  font-weight: 700;
+  color: #1a73e8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.contact-section-item {
+  font-size: 11px;
+  color: #444;
+  line-height: 1.4;
+  padding: 2px 0;
+  word-break: break-word;
+}

@@ -13,28 +13,43 @@ if (window.__smartScraperInjected) {
 
     if (message.type === MSG.SCRAPE_REQUEST) {
       const siteType = message.siteType || detectSiteType();
-      let data;
 
-      switch (siteType) {
-        case "ecommerce":
-          data = scrapeEcommerce();
-          break;
-        case "linkedin":
-          data = scrapeLinkedIn();
-          break;
-        default:
-          data = scrapeGeneral();
-          break;
-      }
+      // Use async handler to support API-based scrapers
+      (async () => {
+        try {
+          let data;
+          switch (siteType) {
+            case "ecommerce":
+              data = scrapeEcommerce();
+              break;
+            case "linkedin":
+              data = await scrapeLinkedIn();
+              break;
+            default:
+              data = scrapeGeneral();
+              break;
+          }
 
-      sendResponse({
-        siteType,
-        data,
-        url: window.location.href,
-        pageTitle: document.title,
-        timestamp: new Date().toISOString()
-      });
-      return true;
+          sendResponse({
+            siteType,
+            data,
+            url: window.location.href,
+            pageTitle: document.title,
+            timestamp: new Date().toISOString()
+          });
+        } catch (err) {
+          sendResponse({
+            siteType,
+            data: null,
+            error: err.message,
+            url: window.location.href,
+            pageTitle: document.title,
+            timestamp: new Date().toISOString()
+          });
+        }
+      })();
+
+      return true; // Keep message channel open for async response
     }
   });
 }

@@ -160,7 +160,7 @@ function buildContactCard(contact) {
     card.appendChild(titleEl);
   }
 
-  // Copyable fields
+  // Basic copyable fields
   const fields = [
     { label: "Name", value: contact.name },
     { label: "Designation", value: contact.title },
@@ -168,7 +168,10 @@ function buildContactCard(contact) {
     { label: "Phone", value: contact.phone },
     { label: "Company", value: contact.company },
     { label: "Location", value: contact.location },
-    { label: "Profile", value: contact.profileUrl }
+    { label: "Profile", value: contact.profileUrl },
+    { label: "Twitter", value: contact.twitter },
+    { label: "Websites", value: (contact.websites || []).join(", ") },
+    { label: "Birthday", value: contact.birthday }
   ];
 
   for (const field of fields) {
@@ -197,20 +200,81 @@ function buildContactCard(contact) {
     card.appendChild(row);
   }
 
+  // Experience section
+  if (contact.experience && contact.experience.length > 0) {
+    card.appendChild(buildSection("Experience", contact.experience.map(exp =>
+      `${exp.title}${exp.company ? " at " + exp.company : ""}${exp.startDate ? " (" + exp.startDate + " - " + (exp.endDate || "Present") + ")" : ""}`
+    )));
+  }
+
+  // Education section
+  if (contact.education && contact.education.length > 0) {
+    card.appendChild(buildSection("Education", contact.education.map(edu =>
+      `${edu.school}${edu.degree ? " - " + edu.degree : ""}${edu.field ? " (" + edu.field + ")" : ""}`
+    )));
+  }
+
+  // Skills section
+  if (contact.skills && contact.skills.length > 0) {
+    card.appendChild(buildSection("Skills", [contact.skills.join(", ")]));
+  }
+
+  // About section
+  if (contact.about) {
+    card.appendChild(buildSection("About", [contact.about]));
+  }
+
   // Copy All button
   const copyAllBtn = document.createElement("button");
   copyAllBtn.className = "btn-copy-all";
   copyAllBtn.textContent = "Copy All Info";
   copyAllBtn.addEventListener("click", () => {
-    const allText = fields
+    let allText = fields
       .filter(f => f.value)
       .map(f => `${f.label}: ${f.value}`)
       .join("\n");
+
+    if (contact.experience?.length) {
+      allText += "\n\nExperience:\n" + contact.experience.map(exp =>
+        `- ${exp.title}${exp.company ? " at " + exp.company : ""}${exp.startDate ? " (" + exp.startDate + " - " + (exp.endDate || "Present") + ")" : ""}${exp.description ? "\n  " + exp.description : ""}`
+      ).join("\n");
+    }
+    if (contact.education?.length) {
+      allText += "\n\nEducation:\n" + contact.education.map(edu =>
+        `- ${edu.school}${edu.degree ? " - " + edu.degree : ""}${edu.field ? " (" + edu.field + ")" : ""}`
+      ).join("\n");
+    }
+    if (contact.skills?.length) {
+      allText += "\n\nSkills: " + contact.skills.join(", ");
+    }
+    if (contact.about) {
+      allText += "\n\nAbout: " + contact.about;
+    }
+
     copyToClipboard(allText, copyAllBtn);
   });
   card.appendChild(copyAllBtn);
 
   return card;
+}
+
+function buildSection(title, items) {
+  const section = document.createElement("div");
+  section.className = "contact-section";
+
+  const header = document.createElement("div");
+  header.className = "contact-section-header";
+  header.textContent = title;
+  section.appendChild(header);
+
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "contact-section-item";
+    row.textContent = item;
+    section.appendChild(row);
+  }
+
+  return section;
 }
 
 function copyToClipboard(text, btn) {
@@ -240,10 +304,27 @@ function flattenDataToRows(response) {
   }
 
   if (siteType === "linkedin" && data.contacts) {
-    const headers = ["Name", "Title", "Company", "Location", "Email", "Phone", "Profile URL", "About", "Connections"];
+    const headers = [
+      "Name", "Title/Designation", "Company", "Location", "Email", "Phone",
+      "Profile URL", "Twitter", "Websites", "Birthday", "Connections",
+      "Experience", "Education", "Skills", "About"
+    ];
     const rows = data.contacts.map(c => [
-      c.name, c.title, c.company, c.location, c.email, c.phone,
-      c.profileUrl, c.about, c.connections
+      c.name,
+      c.title,
+      c.company,
+      c.location,
+      c.email,
+      c.phone,
+      c.profileUrl,
+      c.twitter || "",
+      (c.websites || []).join(", "),
+      c.birthday || "",
+      c.connections,
+      (c.experience || []).map(e => `${e.title} at ${e.company} (${e.startDate || ""} - ${e.endDate || "Present"})`).join("; "),
+      (c.education || []).map(e => `${e.school}${e.degree ? " - " + e.degree : ""}${e.field ? " (" + e.field + ")" : ""}`).join("; "),
+      (c.skills || []).join(", "),
+      c.about
     ]);
     return [headers, ...rows];
   }
