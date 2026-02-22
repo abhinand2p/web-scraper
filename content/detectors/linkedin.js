@@ -1,299 +1,339 @@
-// LinkedIn Voyager API scraper - fetches deep profile data using LinkedIn's internal API
+// LinkedIn scraper - uses page-level script injection to access Voyager API
+// This is necessary because LinkedIn's JSESSIONID cookie is HttpOnly,
+// so content scripts can't read it for the CSRF token.
 
 async function scrapeLinkedIn() {
   const path = window.location.pathname;
 
-  // Profile page
   if (path.startsWith("/in/")) {
     const username = path.split("/in/")[1].split("/")[0].split("?")[0];
-    return await scrapeLinkedInProfile(username);
+    return await scrapeProfileViaPageScript(username);
   }
 
-  // Search results
   if (path.includes("/search/")) {
-    return scrapeLinkedInSearchResults();
+    return scrapeLinkedInSearchDOM();
   }
 
-  // Company page
   if (path.includes("/company/")) {
-    return scrapeLinkedInCompany();
+    return scrapeLinkedInCompanyDOM();
   }
 
-  // Fallback to DOM scraping
-  return { type: "linkedin", contacts: [scrapeLinkedInDOM()] };
+  return { type: "linkedin", contacts: [buildDOMProfile()] };
 }
 
-// --- Voyager API Helpers ---
+// --- Main profile scraping via page-level script injection ---
 
-function getCSRFToken() {
-  // LinkedIn stores CSRF token in JSESSIONID cookie (with quotes)
-  const match = document.cookie.match(/JSESSIONID="?([^";]+)"?/);
-  return match ? match[1] : "";
+async function scrapeProfileViaPageScript(username) {
+  return new Promise((resolve) => {
+    // Listen for the result from the injected page script
+    const handler = (event) => {
+      if (event.detail && event.detail.__smartScraperResult) {
+        document.removeEventListener("__smartScraperDone", handler);
+        const result = event.detail.__smartScraperResult;
+        resolve({ type: "linkedin", contacts: [result] });
+      }
+    };
+    document.addEventListener("__smartScraperDone", handler);
+
+    // Inject script into the page's MAIN world
+    const script = document.createElement("script");
+    script.textContent = `(${pageWorldScraper.toString()})("${username}")`;
+    document.documentElement.appendChild(script);
+    script.remove();
+
+    // Timeout fallback - if page script fails, use DOM
+    setTimeout(() => {
+      document.removeEventListener("__smartScraperDone", handler);
+      const domResult = buildDOMProfile();
+      resolve({ type: "linkedin", contacts: [domResult] });
+    }, 8000);
+  });
 }
 
-async function voyagerFetch(url) {
-  const csrf = getCSRFToken();
-  if (!csrf) return null;
-
-  try {
-    const resp = await fetch(url, {
-      headers: {
-        "csrf-token": csrf,
-        "accept": "application/vnd.linkedin.normalized+json+2.1",
-        "x-restli-protocol-version": "2.0.0"
-      },
-      credentials: "include"
-    });
-
-    if (!resp.ok) return null;
-    return await resp.json();
-  } catch (e) {
-    return null;
+// This function runs in the PAGE's world (not content script)
+// It has access to cookies, LinkedIn's auth, and can fetch Voyager API
+function pageWorldScraper(username) {
+  // Get CSRF token from cookie (accessible in page world)
+  function getCsrf() {
+    const m = document.cookie.match(/JSESSIONID="?([^";]+)"?/);
+    return m ? m[1] : "";
   }
+
+  async function apiFetch(url) {
+    const csrf = getCsrf();
+    if (!csrf) return null;
+    try {
+      const r = await fetch(url, {
+        headers: {
+          "csrf-token": csrf,
+          "accept": "application/vnd.linkedin.normalized+json+2.1",
+          "x-restli-protocol-version": "2.0.0"
+        },
+        credentials: "same-origin"
+      });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function run() {
+    const contact = {
+      name: "", title: "", email: "", phone: "",
+      company: "", location: "",
+      profileUrl: "https://www.linkedin.com/in/" + username,
+      about: "", connections: "",
+      experience: [], education: [], skills: [],
+      websites: [], twitter: "", birthday: ""
+    };
+
+    // Fetch all data in parallel
+    const [profileResp, contactResp, skillsResp] = await Promise.all([
+      apiFetch("https://www.linkedin.com/voyager/api/identity/dash/profiles?q=memberIdentity&memberIdentity=" + username + "&decorationId=com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-93"),
+      apiFetch("https://www.linkedin.com/voyager/api/identity/profiles/" + username + "/profileContactInfo"),
+      apiFetch("https://www.linkedin.com/voyager/api/identity/profiles/" + username + "/skills?count=50")
+    ]);
+
+    // Parse profile
+    if (profileResp && profileResp.included) {
+      for (const e of profileResp.included) {
+        const t = e["$type"] || "";
+
+        // Main profile
+        if (t.includes("profile.Profile") || t.includes("profile.FullProfile")) {
+          if (e.firstName) contact.name = (e.firstName + " " + (e.lastName || "")).trim();
+          if (e.headline) contact.title = e.headline;
+          if (e.summary) contact.about = e.summary.substring(0, 1000);
+          if (e.locationName) contact.location = e.locationName;
+          if (e.geoLocationName) contact.location = e.geoLocationName;
+          if (e.industryName) contact.industry = e.industryName;
+        }
+
+        // MiniProfile
+        if (t.includes("MiniProfile") && !contact.name && e.firstName) {
+          contact.name = (e.firstName + " " + (e.lastName || "")).trim();
+          if (e.occupation) contact.title = e.occupation;
+        }
+
+        // Experience / Position
+        if (t.includes("Position") && (e.title || e.companyName)) {
+          var sd = e.dateRange ? e.dateRange.start : (e.timePeriod ? e.timePeriod.startDate : null);
+          var ed = e.dateRange ? e.dateRange.end : (e.timePeriod ? e.timePeriod.endDate : null);
+          contact.experience.push({
+            title: e.title || "",
+            company: e.companyName || "",
+            location: e.locationName || "",
+            startDate: sd ? ((sd.month || "") + (sd.month && sd.year ? "/" : "") + (sd.year || "")) : "",
+            endDate: ed ? ((ed.month || "") + (ed.month && ed.year ? "/" : "") + (ed.year || "")) : "Present",
+            description: (e.description || "").substring(0, 300)
+          });
+        }
+
+        // Education
+        if (t.includes("Education") && e.schoolName) {
+          var esd = e.dateRange ? e.dateRange.start : (e.timePeriod ? e.timePeriod.startDate : null);
+          var eed = e.dateRange ? e.dateRange.end : (e.timePeriod ? e.timePeriod.endDate : null);
+          contact.education.push({
+            school: e.schoolName || "",
+            degree: e.degreeName || e.degree || "",
+            field: e.fieldOfStudy || "",
+            startDate: esd ? String(esd.year || "") : "",
+            endDate: eed ? String(eed.year || "") : ""
+          });
+        }
+
+        // Network info
+        if (e.connectionsCount !== undefined || e.connectionCount !== undefined) {
+          contact.connections = String(e.connectionsCount || e.connectionCount || "");
+        }
+      }
+
+      // Set current company from experience
+      if (contact.experience.length > 0) {
+        var current = contact.experience.find(function(x) { return x.endDate === "Present"; }) || contact.experience[0];
+        contact.company = current.company;
+      }
+    }
+
+    // Parse contact info
+    if (contactResp) {
+      var ci = contactResp.data || contactResp;
+      contact.email = ci.emailAddress || "";
+      if (ci.phoneNumbers && ci.phoneNumbers.length) {
+        contact.phone = ci.phoneNumbers.map(function(p) { return p.number; }).join(", ");
+      }
+      if (ci.twitterHandles && ci.twitterHandles.length) {
+        contact.twitter = ci.twitterHandles.map(function(t) { return t.name; }).join(", ");
+      }
+      if (ci.websites && ci.websites.length) {
+        contact.websites = ci.websites.map(function(w) { return w.url || ""; });
+      }
+      if (ci.birthDateOn) {
+        contact.birthday = (ci.birthDateOn.month || "") + "/" + (ci.birthDateOn.day || "");
+      }
+    }
+
+    // Parse skills
+    if (skillsResp) {
+      var elements = (skillsResp.data && skillsResp.data.elements) || skillsResp.elements || [];
+      for (var i = 0; i < elements.length; i++) {
+        var skillName = elements[i].name || (elements[i].skill && elements[i].skill.name) || "";
+        if (skillName) contact.skills.push(skillName);
+      }
+      // Also try included array
+      if (contact.skills.length === 0 && skillsResp.included) {
+        for (var j = 0; j < skillsResp.included.length; j++) {
+          var sk = skillsResp.included[j];
+          if (sk.name && (sk["$type"] || "").includes("Skill")) {
+            contact.skills.push(sk.name);
+          }
+        }
+      }
+    }
+
+    // If name still empty, grab from DOM as last resort
+    if (!contact.name) {
+      var h1 = document.querySelector("h1");
+      if (h1) contact.name = h1.textContent.trim();
+    }
+
+    // Dispatch result back to content script
+    document.dispatchEvent(new CustomEvent("__smartScraperDone", {
+      detail: { __smartScraperResult: contact }
+    }));
+  }
+
+  run();
 }
 
-// --- Profile Scraping via API ---
+// --- DOM-based scrapers (for search results, company pages, and fallback) ---
 
-async function scrapeLinkedInProfile(username) {
-  // Fetch profile, contact info, and skills in parallel
-  const [profileData, contactData, skillsData] = await Promise.all([
-    voyagerFetch(`https://www.linkedin.com/voyager/api/identity/dash/profiles?q=memberIdentity&memberIdentity=${username}&decorationId=com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-93`),
-    voyagerFetch(`https://www.linkedin.com/voyager/api/identity/profiles/${username}/profileContactInfo`),
-    voyagerFetch(`https://www.linkedin.com/voyager/api/identity/profiles/${username}/skills?count=50`)
-  ]);
+function buildDOMProfile() {
+  const name = domText("h1") || "";
+  const title = domText(".text-body-medium.break-words, div.text-body-medium") || "";
 
-  const contact = {
-    name: "",
-    title: "",
-    email: "",
-    phone: "",
-    company: "",
-    location: "",
-    profileUrl: `https://www.linkedin.com/in/${username}`,
-    about: "",
-    connections: "",
-    experience: [],
-    education: [],
-    skills: [],
+  // Try to extract company from headline "Title at Company"
+  let company = "";
+  if (title.includes(" at ")) {
+    company = title.split(" at ").slice(1).join(" at ").trim();
+  } else if (title.includes(" @ ")) {
+    company = title.split(" @ ").slice(1).join(" @ ").trim();
+  }
+
+  // Location
+  const location = domText(
+    "span.text-body-small.inline.t-black--light.break-words"
+  ) || "";
+
+  // About
+  const about = domText(
+    "#about ~ div .inline-show-more-text span[aria-hidden='true'], " +
+    "#about + div + div span[aria-hidden='true']"
+  ) || "";
+
+  // Experience from DOM
+  const experience = [];
+  const expSection = document.querySelector("#experience");
+  if (expSection) {
+    const expContainer = expSection.closest("section") || expSection.parentElement?.parentElement;
+    if (expContainer) {
+      const expItems = expContainer.querySelectorAll("li.artdeco-list__item, li[class*='pvs-list__paged-list-item']");
+      for (const item of expItems) {
+        const spans = item.querySelectorAll("span[aria-hidden='true']");
+        if (spans.length >= 2) {
+          experience.push({
+            title: spans[0]?.textContent?.trim() || "",
+            company: spans[1]?.textContent?.trim() || "",
+            location: spans[3]?.textContent?.trim() || "",
+            startDate: "",
+            endDate: "",
+            description: ""
+          });
+        }
+      }
+    }
+  }
+
+  // Education from DOM
+  const education = [];
+  const eduSection = document.querySelector("#education");
+  if (eduSection) {
+    const eduContainer = eduSection.closest("section") || eduSection.parentElement?.parentElement;
+    if (eduContainer) {
+      const eduItems = eduContainer.querySelectorAll("li.artdeco-list__item, li[class*='pvs-list__paged-list-item']");
+      for (const item of eduItems) {
+        const spans = item.querySelectorAll("span[aria-hidden='true']");
+        if (spans.length >= 1) {
+          education.push({
+            school: spans[0]?.textContent?.trim() || "",
+            degree: spans[1]?.textContent?.trim() || "",
+            field: "",
+            startDate: "",
+            endDate: ""
+          });
+        }
+      }
+    }
+  }
+
+  // Skills from DOM
+  const skills = [];
+  const skillsSection = document.querySelector("#skills");
+  if (skillsSection) {
+    const skillsContainer = skillsSection.closest("section") || skillsSection.parentElement?.parentElement;
+    if (skillsContainer) {
+      const skillItems = skillsContainer.querySelectorAll("span[aria-hidden='true']");
+      for (const item of skillItems) {
+        const text = item.textContent.trim();
+        if (text && text.length < 60 && !text.includes("\n")) {
+          skills.push(text);
+        }
+      }
+    }
+  }
+
+  return {
+    name, title, company, location,
+    email: (() => {
+      const el = document.querySelector('a[href^="mailto:"]');
+      return el ? el.href.replace("mailto:", "").split("?")[0] : "";
+    })(),
+    phone: (() => {
+      const el = document.querySelector('a[href^="tel:"]');
+      return el ? el.href.replace("tel:", "") : "";
+    })(),
+    profileUrl: window.location.href.split("?")[0],
+    about,
+    connections: domText("span.t-bold:not(h1 span):not(h2 span)") || "",
+    experience,
+    education,
+    skills,
     websites: [],
     twitter: "",
     birthday: ""
   };
-
-  // Parse profile data
-  if (profileData) {
-    const profile = extractProfile(profileData);
-    contact.name = profile.name;
-    contact.title = profile.headline;
-    contact.location = profile.location;
-    contact.about = profile.summary;
-    contact.company = profile.currentCompany;
-    contact.experience = profile.experience;
-    contact.education = profile.education;
-    contact.connections = profile.connectionCount;
-  }
-
-  // Parse contact info
-  if (contactData && contactData.data) {
-    const ci = contactData.data;
-    contact.email = ci.emailAddress || "";
-    contact.phone = (ci.phoneNumbers || []).map(p => p.number).join(", ");
-    contact.twitter = (ci.twitterHandles || []).map(t => t.name).join(", ");
-    contact.websites = (ci.websites || []).map(w => w.url || w.name || "");
-    contact.birthday = ci.birthDateOn
-      ? `${ci.birthDateOn.month}/${ci.birthDateOn.day}`
-      : "";
-  }
-
-  // Parse skills
-  if (skillsData) {
-    contact.skills = extractSkills(skillsData);
-  }
-
-  // If API failed, fall back to DOM scraping
-  if (!contact.name) {
-    const domData = scrapeLinkedInDOM();
-    Object.keys(domData).forEach(key => {
-      if (domData[key] && !contact[key]) contact[key] = domData[key];
-    });
-  }
-
-  return { type: "linkedin", contacts: [contact] };
 }
 
-function extractProfile(apiData) {
-  const result = {
-    name: "",
-    headline: "",
-    location: "",
-    summary: "",
-    currentCompany: "",
-    connectionCount: "",
-    experience: [],
-    education: []
-  };
-
-  // The API returns data in 'included' array and 'data' object
-  const included = apiData.included || [];
-  const data = apiData.data || {};
-
-  // Find the main profile entity
-  for (const entity of included) {
-    // Profile basics
-    if (entity.$type === "com.linkedin.voyager.dash.identity.profile.Profile" ||
-        entity.$type === "com.linkedin.voyager.identity.profile.Profile") {
-      result.name = [entity.firstName, entity.lastName].filter(Boolean).join(" ");
-      result.headline = entity.headline || "";
-      result.summary = (entity.summary || entity.about || "").substring(0, 1000);
-      if (entity.locationName) result.location = entity.locationName;
-      if (entity.geoLocationName) result.location = entity.geoLocationName;
-    }
-
-    // Also check for miniProfile
-    if (entity.$type === "com.linkedin.voyager.identity.shared.MiniProfile" ||
-        entity.$type === "com.linkedin.voyager.dash.identity.profile.tetris.MiniProfile") {
-      if (!result.name && entity.firstName) {
-        result.name = [entity.firstName, entity.lastName].filter(Boolean).join(" ");
-      }
-      if (!result.headline && entity.occupation) {
-        result.headline = entity.occupation;
-      }
-    }
-
-    // Experience / positions
-    if (entity.$type === "com.linkedin.voyager.dash.identity.profile.Position" ||
-        entity.$type === "com.linkedin.voyager.identity.profile.Position") {
-      const exp = {
-        title: entity.title || "",
-        company: entity.companyName || "",
-        location: entity.locationName || "",
-        startDate: formatLinkedInDate(entity.dateRange?.start || entity.timePeriod?.startDate),
-        endDate: formatLinkedInDate(entity.dateRange?.end || entity.timePeriod?.endDate) || "Present",
-        description: (entity.description || "").substring(0, 300)
-      };
-      if (exp.title || exp.company) {
-        result.experience.push(exp);
-      }
-    }
-
-    // Education
-    if (entity.$type === "com.linkedin.voyager.dash.identity.profile.Education" ||
-        entity.$type === "com.linkedin.voyager.identity.profile.Education") {
-      const edu = {
-        school: entity.schoolName || entity.school || "",
-        degree: entity.degreeName || entity.degree || "",
-        field: entity.fieldOfStudy || "",
-        startDate: formatLinkedInDate(entity.dateRange?.start || entity.timePeriod?.startDate),
-        endDate: formatLinkedInDate(entity.dateRange?.end || entity.timePeriod?.endDate)
-      };
-      if (edu.school) {
-        result.education.push(edu);
-      }
-    }
-
-    // Network info (connections count)
-    if (entity.$type === "com.linkedin.voyager.dash.identity.profile.tetris.NetworkInfo" ||
-        entity.connectionsCount !== undefined) {
-      result.connectionCount = String(entity.connectionsCount || entity.connectionCount || "");
-    }
-  }
-
-  // Extract company names from included entities for experience
-  const companyMap = {};
-  for (const entity of included) {
-    if (entity.$type === "com.linkedin.voyager.dash.organization.Company" ||
-        entity.$type === "com.linkedin.voyager.organization.Company") {
-      if (entity.entityUrn && entity.name) {
-        companyMap[entity.entityUrn] = entity.name;
-      }
-    }
-  }
-
-  // Fill in company names from references and find current company
-  for (const exp of result.experience) {
-    if (!exp.company) {
-      // Try to resolve from company map
-      for (const [urn, name] of Object.entries(companyMap)) {
-        exp.company = name;
-        break;
-      }
-    }
-  }
-
-  // Current company = first experience entry (most recent)
-  if (result.experience.length > 0) {
-    const current = result.experience.find(e => e.endDate === "Present") || result.experience[0];
-    result.currentCompany = current.company;
-  }
-
-  return result;
-}
-
-function extractSkills(apiData) {
-  const skills = [];
-  const included = apiData.included || apiData.data || [];
-  const elements = apiData.data?.elements || apiData.elements || [];
-
-  // Try elements array first
-  for (const el of elements) {
-    const name = el.name || el.skill?.name || "";
-    if (name) skills.push(name);
-  }
-
-  // Try included array
-  if (skills.length === 0) {
-    for (const entity of (Array.isArray(included) ? included : [])) {
-      if (entity.$type === "com.linkedin.voyager.identity.profile.Skill" ||
-          entity.$type === "com.linkedin.voyager.dash.identity.profile.Skill") {
-        if (entity.name) skills.push(entity.name);
-      }
-    }
-  }
-
-  return skills;
-}
-
-function formatLinkedInDate(dateObj) {
-  if (!dateObj) return "";
-  const month = dateObj.month || "";
-  const year = dateObj.year || "";
-  if (month && year) return `${month}/${year}`;
-  if (year) return String(year);
-  return "";
-}
-
-// --- Search Results (DOM-based, API is heavily paginated) ---
-
-function scrapeLinkedInSearchResults() {
+function scrapeLinkedInSearchDOM() {
   const contacts = [];
-
-  const resultContainers = document.querySelectorAll(
-    'li.reusable-search__result-container, ' +
-    'div[data-view-name="search-entity-result-universal-template"], ' +
-    'li[class*="search-result"], ' +
-    'div[class*="entity-result"]'
+  const containers = document.querySelectorAll(
+    "li.reusable-search__result-container, " +
+    "li[class*='search-result'], " +
+    "div[class*='entity-result']"
   );
 
-  for (const container of resultContainers) {
-    const nameEl = container.querySelector(
-      'span[dir="ltr"] > span[aria-hidden="true"], ' +
-      'span[aria-hidden="true"]'
+  for (const c of containers) {
+    const nameEl = c.querySelector(
+      "span[dir='ltr'] > span[aria-hidden='true'], " +
+      "span[aria-hidden='true']"
     );
     const name = nameEl?.textContent?.trim()?.replace(/\s+/g, " ") || "";
     if (!name || name.length < 2) continue;
 
-    const profileLink = container.querySelector('a[href*="/in/"]');
-    const profileUrl = profileLink?.href?.split("?")[0] || "";
-
-    const title = getSearchText(container, [
-      '.entity-result__primary-subtitle',
-      'div[class*="entity-result__primary-subtitle"]'
-    ]);
-
-    const location = getSearchText(container, [
-      '.entity-result__secondary-subtitle',
-      'div[class*="entity-result__secondary-subtitle"]'
-    ]);
+    const profileUrl = c.querySelector("a[href*='/in/']")?.href?.split("?")[0] || "";
+    const title = searchText(c, ".entity-result__primary-subtitle, div[class*='entity-result__primary-subtitle']");
+    const location = searchText(c, ".entity-result__secondary-subtitle, div[class*='entity-result__secondary-subtitle']");
 
     contacts.push({
       name, title, company: "", location,
@@ -307,55 +347,21 @@ function scrapeLinkedInSearchResults() {
   return { type: "linkedin", contacts };
 }
 
-// --- Company Page (DOM-based) ---
-
-function scrapeLinkedInCompany() {
-  const companyName = domText("h1 span, h1") || "";
-  const industry = domText(".org-top-card-summary-info-list__info-item") || "";
-  const about = domText("[class*='org-about'] p, .org-about-company-module__description") || "";
-
+function scrapeLinkedInCompanyDOM() {
   return {
     type: "linkedin",
     contacts: [{
-      name: companyName,
+      name: domText("h1 span, h1") || "",
       title: "Company",
-      company: industry,
+      company: domText(".org-top-card-summary-info-list__info-item") || "",
       location: "",
       email: "", phone: "",
       profileUrl: window.location.href.split("?")[0],
-      about: about.substring(0, 500),
+      about: (domText("[class*='org-about'] p, .org-about-company-module__description") || "").substring(0, 500),
       connections: "",
       experience: [], education: [], skills: [],
       websites: [], twitter: "", birthday: ""
     }]
-  };
-}
-
-// --- DOM Fallback ---
-
-function scrapeLinkedInDOM() {
-  return {
-    name: domText("h1") || "",
-    title: domText(".text-body-medium.break-words, div.text-body-medium") || "",
-    email: (() => {
-      const el = document.querySelector('a[href^="mailto:"]');
-      return el ? el.href.replace("mailto:", "").split("?")[0] : "";
-    })(),
-    phone: (() => {
-      const el = document.querySelector('a[href^="tel:"]');
-      return el ? el.href.replace("tel:", "") : "";
-    })(),
-    company: "",
-    location: "",
-    profileUrl: window.location.href.split("?")[0],
-    about: "",
-    connections: "",
-    experience: [],
-    education: [],
-    skills: [],
-    websites: [],
-    twitter: "",
-    birthday: ""
   };
 }
 
@@ -370,15 +376,9 @@ function domText(selector) {
   } catch (e) { return ""; }
 }
 
-function getSearchText(container, selectors) {
-  for (const sel of selectors) {
-    try {
-      const el = container.querySelector(sel);
-      if (el) {
-        const text = el.textContent.trim().replace(/\s+/g, " ");
-        if (text) return text;
-      }
-    } catch (e) {}
-  }
-  return "";
+function searchText(container, selector) {
+  try {
+    const el = container.querySelector(selector);
+    return el ? el.textContent.trim().replace(/\s+/g, " ") : "";
+  } catch (e) { return ""; }
 }
