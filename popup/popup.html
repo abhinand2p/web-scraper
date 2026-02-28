@@ -8,8 +8,43 @@
   <div id="app">
     <header>
       <h1>Smart Scraper</h1>
-      <span id="site-type-badge" class="badge hidden"></span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span id="site-type-badge" class="badge hidden"></span>
+        <button id="btn-settings" class="btn-settings-icon" title="API Settings">&#9881;</button>
+      </div>
     </header>
+
+    <!-- Settings Panel -->
+    <section id="settings-section" class="hidden">
+      <h2>Contact Enrichment API</h2>
+      <p class="summary-text">
+        Enrich LinkedIn contacts with email &amp; phone via a third-party API.
+        Sign up for a free key at your chosen provider.
+      </p>
+
+      <div class="settings-field">
+        <label class="settings-label" for="provider-select">Provider</label>
+        <select id="provider-select" class="settings-select">
+          <option value="hunter">Hunter.io (email only)</option>
+          <option value="apollo">Apollo.io (email + phone)</option>
+          <option value="snov">Snov.io (email)</option>
+        </select>
+      </div>
+
+      <div class="settings-field">
+        <label class="settings-label" for="api-key-input">API Key</label>
+        <input id="api-key-input" class="settings-input" type="password"
+               placeholder="Paste your API key here" autocomplete="off" />
+      </div>
+
+      <div id="provider-hint" class="settings-hint"></div>
+
+      <div class="button-group" style="margin-top:10px;">
+        <button id="btn-save-settings" class="btn btn-primary" style="font-size:12px;padding:8px;">Save</button>
+        <button id="btn-clear-settings" class="btn btn-secondary" style="font-size:12px;padding:8px;margin-top:0;">Clear</button>
+      </div>
+      <p id="settings-status" class="settings-status hidden"></p>
+    </section>
 
     <section id="status-section">
       <div class="spinner"></div>
@@ -62,6 +97,7 @@
   <script src="../utils/message-types.js"></script>
   <script src="../lib/xlsx.full.min.js"></script>
   <script src="../utils/csv-generator.js"></script>
+  <script src="../utils/enrichment.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

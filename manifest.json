@@ -6,7 +6,13 @@
   "permissions": [
     "activeTab",
     "scripting",
-    "downloads"
+    "downloads",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://api.hunter.io/*",
+    "https://api.apollo.io/*",
+    "https://api.snov.io/*"
   ],
   "action": {
     "default_popup": "popup/popup.html",

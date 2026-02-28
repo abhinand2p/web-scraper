@@ -1,9 +1,14 @@
 let scrapedData = null;
 let currentTabId = null;
+let enrichmentSettings = null; // { provider, apiKey }
 
 document.addEventListener("DOMContentLoaded", async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabId = tab.id;
+
+  // Load saved enrichment settings
+  enrichmentSettings = await loadSettings();
+  initSettingsPanel();
 
   // Check if we can access this page
   if (!tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("about:") ||
@@ -60,6 +65,84 @@ function handleScrape() {
 
     scrapedData = response;
     showResults(response);
+  });
+}
+
+// --- Settings Panel ---
+
+function initSettingsPanel() {
+  const btn = document.getElementById("btn-settings");
+  const panel = document.getElementById("settings-section");
+  const providerSelect = document.getElementById("provider-select");
+  const apiKeyInput = document.getElementById("api-key-input");
+  const saveBtn = document.getElementById("btn-save-settings");
+  const clearBtn = document.getElementById("btn-clear-settings");
+  const statusEl = document.getElementById("settings-status");
+
+  // Populate from saved settings
+  if (enrichmentSettings && enrichmentSettings.provider) {
+    providerSelect.value = enrichmentSettings.provider;
+    apiKeyInput.value = enrichmentSettings.apiKey || "";
+  }
+  updateProviderHint(providerSelect.value);
+
+  // Toggle panel
+  btn.addEventListener("click", () => {
+    const isHidden = panel.classList.contains("hidden");
+    panel.classList.toggle("hidden", !isHidden);
+    btn.classList.toggle("active", isHidden);
+  });
+
+  // Update hint on provider change
+  providerSelect.addEventListener("change", () => updateProviderHint(providerSelect.value));
+
+  // Save
+  saveBtn.addEventListener("click", async () => {
+    const provider = providerSelect.value;
+    const apiKey = apiKeyInput.value.trim();
+
+    if (!apiKey) {
+      showSettingsStatus("Please enter an API key.", "error");
+      return;
+    }
+
+    enrichmentSettings = { provider, apiKey };
+    await chrome.storage.sync.set({ enrichmentSettings });
+    showSettingsStatus("Saved!", "success");
+    setTimeout(() => statusEl.classList.add("hidden"), 2000);
+  });
+
+  // Clear
+  clearBtn.addEventListener("click", async () => {
+    apiKeyInput.value = "";
+    enrichmentSettings = null;
+    await chrome.storage.sync.remove("enrichmentSettings");
+    showSettingsStatus("API key cleared.", "success");
+    setTimeout(() => statusEl.classList.add("hidden"), 2000);
+  });
+}
+
+function updateProviderHint(provider) {
+  const hints = {
+    hunter: "Free tier: 25 requests/month. Sign up at hunter.io → Dashboard → API.",
+    apollo: "Free tier: 50 exports/month. Sign up at apollo.io → Settings → Integrations → API.",
+    snov: "Free tier: 50 credits/month. Sign up at snov.io → My Profile → API. Enter as clientId:clientSecret."
+  };
+  document.getElementById("provider-hint").textContent = hints[provider] || "";
+}
+
+function showSettingsStatus(msg, type) {
+  const el = document.getElementById("settings-status");
+  el.textContent = msg;
+  el.className = "settings-status " + type;
+  el.classList.remove("hidden");
+}
+
+async function loadSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.sync.get("enrichmentSettings", (result) => {
+      resolve(result.enrichmentSettings || null);
+    });
   });
 }
 
@@ -175,29 +258,7 @@ function buildContactCard(contact) {
   ];
 
   for (const field of fields) {
-    const row = document.createElement("div");
-    row.className = "contact-field";
-
-    const label = document.createElement("span");
-    label.className = "contact-field-label";
-    label.textContent = field.label;
-
-    const value = document.createElement("span");
-    value.className = "contact-field-value" + (field.value ? "" : " empty");
-    value.textContent = field.value || "N/A";
-
-    row.appendChild(label);
-    row.appendChild(value);
-
-    if (field.value) {
-      const copyBtn = document.createElement("button");
-      copyBtn.className = "btn-copy";
-      copyBtn.textContent = "Copy";
-      copyBtn.addEventListener("click", () => copyToClipboard(field.value, copyBtn));
-      row.appendChild(copyBtn);
-    }
-
-    card.appendChild(row);
+    card.appendChild(buildField(field.label, field.value));
   }
 
   // Experience section
@@ -255,7 +316,117 @@ function buildContactCard(contact) {
   });
   card.appendChild(copyAllBtn);
 
+  // Enrich Contact button
+  card.appendChild(buildEnrichButton(contact, card));
+
   return card;
+}
+
+function buildField(label, value) {
+  const row = document.createElement("div");
+  row.className = "contact-field";
+
+  const labelEl = document.createElement("span");
+  labelEl.className = "contact-field-label";
+  labelEl.textContent = label;
+
+  const valueEl = document.createElement("span");
+  valueEl.className = "contact-field-value" + (value ? "" : " empty");
+  valueEl.textContent = value || "N/A";
+
+  row.appendChild(labelEl);
+  row.appendChild(valueEl);
+
+  if (value) {
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "btn-copy";
+    copyBtn.textContent = "Copy";
+    copyBtn.addEventListener("click", () => copyToClipboard(value, copyBtn));
+    row.appendChild(copyBtn);
+  }
+
+  return row;
+}
+
+function buildEnrichButton(contact, card) {
+  const wrapper = document.createElement("div");
+
+  const enrichBtn = document.createElement("button");
+  enrichBtn.className = "btn-enrich";
+
+  const providerName = enrichmentSettings?.provider
+    ? { hunter: "Hunter.io", apollo: "Apollo.io", snov: "Snov.io" }[enrichmentSettings.provider] || "API"
+    : "API";
+
+  enrichBtn.textContent = enrichmentSettings?.apiKey
+    ? `Find Email/Phone via ${providerName}`
+    : "Find Email/Phone (configure API key first)";
+
+  const resultEl = document.createElement("div");
+  resultEl.className = "enrich-result hidden";
+
+  enrichBtn.addEventListener("click", async () => {
+    if (!enrichmentSettings?.apiKey) {
+      // Open settings panel
+      document.getElementById("settings-section").classList.remove("hidden");
+      document.getElementById("btn-settings").classList.add("active");
+      document.getElementById("settings-section").scrollIntoView({ behavior: "smooth" });
+      return;
+    }
+
+    enrichBtn.disabled = true;
+    enrichBtn.textContent = "Searching...";
+    resultEl.classList.add("hidden");
+
+    const result = await enrichContact(contact, enrichmentSettings);
+
+    enrichBtn.disabled = false;
+    enrichBtn.textContent = `Find Email/Phone via ${providerName}`;
+    resultEl.classList.remove("hidden");
+
+    if (result.error) {
+      resultEl.className = "enrich-result error";
+      resultEl.textContent = result.error;
+    } else {
+      resultEl.className = "enrich-result";
+      resultEl.innerHTML = "";
+
+      if (result.email) {
+        const emailRow = buildEnrichedField("Email", result.email, result.emailConfidence);
+        resultEl.appendChild(emailRow);
+      }
+      if (result.phone) {
+        const phoneRow = buildEnrichedField("Phone", result.phone, "");
+        resultEl.appendChild(phoneRow);
+      }
+      if (!result.email && !result.phone) {
+        resultEl.className = "enrich-result error";
+        resultEl.textContent = "No contact info returned from API.";
+      }
+    }
+  });
+
+  wrapper.appendChild(enrichBtn);
+  wrapper.appendChild(resultEl);
+  return wrapper;
+}
+
+function buildEnrichedField(label, value, note) {
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;";
+
+  const left = document.createElement("span");
+  left.innerHTML = `<strong>${label}</strong>${value}${note ? ` <span style="opacity:0.6;font-size:10px;">(${note})</span>` : ""}`;
+  left.style.flex = "1";
+
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "btn-copy";
+  copyBtn.textContent = "Copy";
+  copyBtn.addEventListener("click", () => copyToClipboard(value, copyBtn));
+
+  row.appendChild(left);
+  row.appendChild(copyBtn);
+  return row;
 }
 
 function buildSection(title, items) {
