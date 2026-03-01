@@ -29,8 +29,11 @@ async function scrapeProfileViaPageScript(username) {
     const handler = (event) => {
       if (event.detail && event.detail.__smartScraperResult) {
         document.removeEventListener("__smartScraperDone", handler);
-        const result = event.detail.__smartScraperResult;
-        resolve({ type: "linkedin", contacts: [result] });
+        // Always merge with DOM data — fills gaps when Voyager API returns nothing
+        const apiResult = event.detail.__smartScraperResult;
+        const domResult = buildDOMProfile();
+        const merged = mergeProfileData(apiResult, domResult);
+        resolve({ type: "linkedin", contacts: [merged] });
       }
     };
     document.addEventListener("__smartScraperDone", handler);
@@ -41,13 +44,28 @@ async function scrapeProfileViaPageScript(username) {
     document.documentElement.appendChild(script);
     script.remove();
 
-    // Timeout fallback - if page script fails, use DOM
+    // Timeout fallback - if page script never fires, use DOM only
     setTimeout(() => {
       document.removeEventListener("__smartScraperDone", handler);
-      const domResult = buildDOMProfile();
-      resolve({ type: "linkedin", contacts: [domResult] });
+      resolve({ type: "linkedin", contacts: [buildDOMProfile()] });
     }, 8000);
   });
+}
+
+// Merges API result with DOM result — API values take priority, DOM fills empty fields
+function mergeProfileData(api, dom) {
+  const result = Object.assign({}, api);
+  const scalars = ["name", "title", "company", "location", "email", "phone", "about", "connections", "twitter", "birthday"];
+  for (const key of scalars) {
+    if (!result[key] && dom[key]) result[key] = dom[key];
+  }
+  const arrays = ["experience", "education", "skills", "websites"];
+  for (const key of arrays) {
+    if ((!result[key] || result[key].length === 0) && dom[key] && dom[key].length > 0) {
+      result[key] = dom[key];
+    }
+  }
+  return result;
 }
 
 // This function runs in the PAGE's world (not content script)
@@ -210,8 +228,19 @@ function pageWorldScraper(username) {
 // --- DOM-based scrapers (for search results, company pages, and fallback) ---
 
 function buildDOMProfile() {
-  const name = domText("h1") || "";
-  const title = domText(".text-body-medium.break-words, div.text-body-medium") || "";
+  // Name — try multiple selectors for LinkedIn's various layouts
+  const name =
+    domText("h1.text-heading-xlarge") ||
+    domText("h1") ||
+    domText(".pv-top-card--list li:first-child") ||
+    "";
+
+  // Headline / title
+  const title =
+    domText(".text-body-medium.break-words") ||
+    domText("div.text-body-medium") ||
+    domText(".pv-top-card-section__headline") ||
+    "";
 
   // Try to extract company from headline "Title at Company"
   let company = "";
@@ -222,15 +251,18 @@ function buildDOMProfile() {
   }
 
   // Location
-  const location = domText(
-    "span.text-body-small.inline.t-black--light.break-words"
-  ) || "";
+  const location =
+    domText("span.text-body-small.inline.t-black--light.break-words") ||
+    domText(".pv-top-card-section__location") ||
+    "";
 
-  // About
-  const about = domText(
-    "#about ~ div .inline-show-more-text span[aria-hidden='true'], " +
-    "#about + div + div span[aria-hidden='true']"
-  ) || "";
+  // About — try several selectors LinkedIn has used over time
+  const about =
+    domText("#about ~ div .inline-show-more-text span[aria-hidden='true']") ||
+    domText("#about + div + div span[aria-hidden='true']") ||
+    domText(".pv-shared-text-with-see-more span[aria-hidden='true']") ||
+    domText(".pv-about__summary-text") ||
+    "";
 
   // Experience from DOM
   const experience = [];
